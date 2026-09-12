@@ -51,7 +51,10 @@ func AnthropicMessages(c *gin.Context) {
 	// （由 buildToolPrompt -> FormatTaggedPrompt 前置），并补一句中性助手身份，
 	// 避免模型被原装 prompt 的"Claude Code 有工具"框架带偏。纯聊天模式仍原样透传。
 	if len(tools) > 0 {
-		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions."}}, msgs...)
+		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions. For web searches you MUST call the WebSearch tool via <tool_call> tags and must not rely on any built-in search capability."}}, msgs...)
+		// WebSearch 的真实结果由代理侧旁路纯聊天搜索注入（见 fulfillWebSearch），
+		// 避免 claude.ai 工具循环内原生搜索返空壳、也不依赖客户端本地 WebSearch。
+		fulfillWebSearch(msgs, model)
 	} else if sysText, _ := flattenContent(req.System); sysText != "" {
 		for _, text := range []string{
 			"You are Claude Code, Anthropic's official CLI for Claude.",
@@ -345,4 +348,61 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 		stopReason = "error"
 	}
 	stream.stop(stopReason, tokenCount(raw))
+}
+
+// fulfillWebSearch 拦截 WebSearch 的 tool_result。claude.ai 网页端在工具循环里
+// 的原生搜索会返回空壳（仅 "REMINDER..." 元提示、无真实内容），而 Claude Code 本地
+// WebSearch 在用户环境里同样返回空。这里改用旁路纯聊天搜索（ClientTools=false，触发
+// claude.ai 普通原生搜索，与纯聊天 Shanghai 实测可用路径一致）拿到真实结果，替换掉
+// 回传的空壳，保证 WebSearch 工具能拿到真实数据。
+//
+// 该拦截无状态、符合协议：Claude Code 的工具循环（tool_use -> tool_result）完全保留，
+// 只是工具结果内容被替换为真实搜索结果。仅在工具模式（len(tools)>0）下调用。
+func fulfillWebSearch(msgs []Message, model string) {
+	// 建立 tool_use_id -> WebSearch query 的映射。
+	queries := map[string]string{}
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.Name != "WebSearch" {
+				continue
+			}
+			var args map[string]any
+			if json.Unmarshal([]byte(tc.Arguments), &args) == nil {
+				if q, ok := args["query"].(string); ok && strings.TrimSpace(q) != "" {
+					queries[tc.ID] = strings.TrimSpace(q)
+				}
+			}
+		}
+	}
+	if len(queries) == 0 {
+		return
+	}
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Role != "tool" {
+			continue
+		}
+		q, ok := queries[m.ToolCallID]
+		if !ok {
+			continue
+		}
+		if real, err := webSearchViaChat(q, model); err == nil && strings.TrimSpace(real) != "" {
+			m.Content = "[WebSearch 旁路真实搜索结果]\n" + real
+		}
+	}
+}
+
+// webSearchViaChat 通过一次干净的纯聊天请求触发 claude.ai 原生 web 搜索，返回真实
+// 搜索文本。ClientTools=false 使 buildCompletionBody 注入 web_search_v0，与纯聊天
+// 模式一致（已验证可返回真实数据，如 Shanghai 天气）。
+func webSearchViaChat(query, model string) (string, error) {
+	prompt := service.Prompt{Text: query, ClientTools: false}
+	var sb strings.Builder
+	if _, err := runner.Complete(model, prompt, func(t string) { sb.WriteString(t) }); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
 }

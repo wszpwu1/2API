@@ -332,19 +332,19 @@ func buildCompletionBody(model string, prompt Prompt, attachments []map[string]a
 		promptText = applySamplingHint(promptText, prompt.Temperature, prompt.TopP)
 	}
 
-	// 原生工具：仅当客户端未自带工具时才全量注入。客户端自带工具（如 Claude Code /
-	// Codex）时，artifacts/repl 必须关闭以免干扰标签协议；但 web_search_v0 需保留：
-	// 经验证，工具模式下若 tools=[]，claude.ai 会把原生搜索压成空框架（仅返
-	// "REMINDER: You MUST include the sources..." 而无真实内容），导致 WebSearch
-	// 失效。保留 web_search_v0 后，天气类查询走原生搜索（与纯聊天模式一致、能返
-	// 真实数据），Read/Edit/Bash 等无原生替代的工具仍走标签协议、由客户端本地执行。
+	// 原生工具：仅当客户端未自带工具（纯聊天）时才注入，以保留联网能力。
+	// 客户端自带工具（Claude Code / Codex）走标签协议时，必须 tools=[]：claude.ai
+	// 账号级 enabled_web_search 会在工具循环里自动触发原生搜索并返空壳（仅
+	// "REMINDER..." 元提示、无真实内容）。WebSearch 的真实结果改由代理侧旁路纯聊天
+	// 搜索注入（见 adapter 包 fulfillWebSearch），既不依赖 claude.ai 循环内搜索，
+	// 也不依赖客户端本地 WebSearch（用户环境里同样返空）。
 	tools := []map[string]any{
 		{"type": "web_search_v0", "name": "web_search"},
 		{"type": "artifacts_v0", "name": "artifacts"},
 		{"type": "repl_v0", "name": "repl"},
 	}
 	if prompt.ClientTools {
-		tools = []map[string]any{{"type": "web_search_v0", "name": "web_search"}}
+		tools = []map[string]any{}
 	}
 
 	body := map[string]any{
