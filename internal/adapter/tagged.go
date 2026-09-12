@@ -55,6 +55,18 @@ Rules:
 - Never output <observation>; the system will provide tool results in the next turn.
 `
 
+// taggedToolDirective 强化指令：claude.ai 网页端作为上游没有真正的 function
+// calling，工具只是以纯文本形式给出。模型极易"礼貌地"用"我没有联网能力"之类
+// 的话拒绝调用工具，从而被容错解析降级成普通回答。此段明确禁止此类拒绝，
+// 并要求对需要实时/外部信息的问题强制使用工具，提升标签协议的实际触发率。
+const taggedToolDirective = `
+IMPORTANT — read carefully before responding:
+- The tools listed below are REAL and available to you right now. You are NOT blocked from using them.
+- If the request needs CURRENT, REAL-TIME, or EXTERNAL information (weather, news, prices, live status, or anything you cannot answer from the conversation alone), you MUST call the appropriate tool. Do not answer from memory when a tool exists.
+- NEVER reply with "I don't have internet access", "I can't browse", "I lack tools", or any similar refusal. Those tools are provided for exactly this purpose.
+- Only emit <final_answer> when you can fully answer using the conversation history alone. When in doubt, prefer calling a tool.
+`
+
 // TaggedToolCall 是解析出的单次工具调用。
 type TaggedToolCall struct {
 	Name      string
@@ -159,7 +171,7 @@ func FormatTaggedPrompt(tools []map[string]any, allowParallel bool) string {
 		base = taggedToolPromptSingle
 	}
 	if toolsText != "" {
-		return base + "\n\n---\n\n## Available tools\n\n" + toolsText + "\n"
+		return base + taggedToolDirective + "\n\n---\n\n## Available tools\n\n" + toolsText + "\n"
 	}
 	return base
 }
