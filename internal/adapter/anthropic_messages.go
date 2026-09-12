@@ -274,7 +274,7 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 	}
 
 	// 原生搜索空壳兜底（同流式）：用旁路真实搜索结果替换空壳响应。
-	if hit, q := detectNativeWebSearch(raw); hit {
+	if empty, q := isNativeSearchEmpty(raw); empty {
 		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
 			c.JSON(http.StatusOK, gin.H{
 				"id":            "msg_" + shortID(),
@@ -355,7 +355,7 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	// 提示、无真实内容）。识别到空壳就用旁路纯聊天搜索（与 WebFetch 等“能用的通道帮不能
 	// 用的”同一思路）取真实结果替换整段响应。这样无论模型走我们的 <tool_call>WebSearch
 	// 标签，还是被 claude.ai 抢先原生搜索，WebSearch 都能拿到真实数据。
-	if hit, q := detectNativeWebSearch(raw); hit {
+	if empty, q := isNativeSearchEmpty(raw); empty {
 		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
 			stream.open(gin.H{"type": "text", "text": ""})
 			stream.delta(gin.H{"type": "text_delta", "text": real})
@@ -453,11 +453,13 @@ func webSearchViaChat(query, model string) (string, error) {
 // 自动触发原生搜索，但在此上下文结果不稳定（常为空壳、偶发真实数据）。
 var webSearchFrameRE = regexp.MustCompile("(?s)Web search results for query:\\s*'([^']*)'")
 
-// detectNativeWebSearch 检测 claude.ai 响应是否包含自发原生 web 搜索的框架行。只要命中该框架，
-// 即视为需要由旁路真实搜索结果接管——因为该上下文里的原生搜索结果不可靠。统一用旁路纯聊天搜索
-// 取真实数据替换整段响应，保证 WebSearch 稳定可用。（旁路失败时调用方会保留原始响应，不报错。）
-// 返回 (是否命中框架, 框架中提取到的查询)。
-func detectNativeWebSearch(raw string) (bool, string) {
+// isNativeSearchEmpty 检测 claude.ai 在工具模式上下文自发原生 web 搜索的框架行
+// "Web search results for query: '…'" 是否已返回真实数据。claude.ai 在此上下文的原生搜索不稳定：
+// 有时直接给真实数据，有时只回空壳（框架 + REMINDER + “没拿到/无法”之类表述）。
+// 仅当"确实没拿到数据"时返回 true，让调用方用旁路真实搜索结果接管；若原生已给真实数据则返回
+// false，保留原生结果、避免重复消耗 claude.ai 配额（否则每次 WebSearch 都会双 call 触发限流）。
+// 返回 (是否需要旁路接管, 框架中提取到的查询)。
+func isNativeSearchEmpty(raw string) (bool, string) {
 	if !strings.Contains(raw, "Web search results for query:") {
 		return false, ""
 	}
@@ -466,7 +468,29 @@ func detectNativeWebSearch(raw string) (bool, string) {
 	if len(m) > 1 {
 		q = strings.TrimSpace(m[1])
 	}
-	return true, q
+	// 去掉框架行与 REMINDER 元提示，看剩余实质内容。
+	body := webSearchFrameRE.ReplaceAllString(raw, "")
+	body = strings.ReplaceAll(body, "REMINDER", "")
+	body = strings.ReplaceAll(body, "\n", " ")
+	body = strings.TrimSpace(body)
+	body = strings.Trim(body, "。. ，,")
+	// 实质内容极少 → 空壳
+	if len([]rune(body)) < 40 {
+		return true, q
+	}
+	// 命中“没拿到数据”的失败表述 → 空壳
+	failPhrases := []string{
+		"没能", "没拿到", "未能", "无法获取", "无法提供", "无法查询", "无法获得",
+		"没有找到", "没有搜到", "没有抓到", "获取失败", "搜索失败", "查不到", "找不到",
+		"couldn't", "could not", "unable to", "no results", "failed to",
+	}
+	lower := strings.ToLower(body)
+	for _, p := range failPhrases {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true, q
+		}
+	}
+	return false, q
 }
 
 // searchQueryFallback 在原生搜索框架未给出可用查询时，回退到提示词原文（用户问题）。
