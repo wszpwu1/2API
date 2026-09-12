@@ -44,7 +44,15 @@ func AnthropicMessages(c *gin.Context) {
 
 	tools := parseTools(req.Tools)
 	msgs, images := normalizeAnthropicMessages(req.Messages)
-	if sysText, _ := flattenContent(req.System); sysText != "" {
+
+	// 带工具（Claude Code）模式：丢弃 Claude Code 原装 system prompt。
+	// 原装 prompt 自带一套"Claude Code 工具协议"，与我们的标签协议互相冲突，
+	// 导致模型困惑并拒绝调用工具（"环境未配置工具"）。此处只保留我们的标签协议
+	// （由 buildToolPrompt -> FormatTaggedPrompt 前置），并补一句中性助手身份，
+	// 避免模型被原装 prompt 的"Claude Code 有工具"框架带偏。纯聊天模式仍原样透传。
+	if len(tools) > 0 {
+		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions."}}, msgs...)
+	} else if sysText, _ := flattenContent(req.System); sysText != "" {
 		for _, text := range []string{
 			"You are Claude Code, Anthropic's official CLI for Claude.",
 			"You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.",
