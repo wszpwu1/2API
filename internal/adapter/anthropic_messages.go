@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"claude2api/internal/service"
@@ -272,6 +273,23 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 		return
 	}
 
+	// 原生搜索空壳兜底（同流式）：用旁路真实搜索结果替换空壳响应。
+	if empty, q := isEmptyNativeSearch(raw); empty {
+		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
+			c.JSON(http.StatusOK, gin.H{
+				"id":            "msg_" + shortID(),
+				"type":          "message",
+				"role":          "assistant",
+				"model":         model,
+				"content":       []gin.H{{"type": "text", "text": "[WebSearch 旁路真实搜索结果]\n" + real}},
+				"stop_reason":   "end_turn",
+				"stop_sequence": nil,
+				"usage":         gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(real)},
+			})
+			return
+		}
+	}
+
 	// 容错解析：上游若不遵守标签协议，降级为纯文本最终回答，绝不报错。
 	parsed := ParseTaggedOutputTolerant(raw)
 
@@ -318,7 +336,37 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newMessageStream(c, model, prompt)
 	stopReason := "end_turn"
 
+	// 先缓冲全部标签事件（不直接转发），以便识别 claude.ai 自发原生搜索空壳后整段替换。
+	var events []TaggedStreamEvent
 	raw, err := runTaggedStream("messages", model, prompt, func(ev TaggedStreamEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		// 始终新开一个 text 块承载错误信息，避免写入已关闭/非文本块。
+		stream.open(gin.H{"type": "text", "text": ""})
+		stream.delta(gin.H{"type": "text_delta", "text": "\n[错误] " + err.Error()})
+		stream.close()
+		stream.stop("error", tokenCount(raw))
+		return
+	}
+
+	// 原生搜索空壳兜底：claude.ai 在工具模式（Claude Code）上下文会账号级自动触发原生
+	// 搜索，但偏偏在此上下文只回空壳（"Web search results for query: '…'" + "REMINDER" 元
+	// 提示、无真实内容）。识别到空壳就用旁路纯聊天搜索（与 WebFetch 等“能用的通道帮不能
+	// 用的”同一思路）取真实结果替换整段响应。这样无论模型走我们的 <tool_call>WebSearch
+	// 标签，还是被 claude.ai 抢先原生搜索，WebSearch 都能拿到真实数据。
+	if empty, q := isEmptyNativeSearch(raw); empty {
+		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
+			stream.open(gin.H{"type": "text", "text": ""})
+			stream.delta(gin.H{"type": "text_delta", "text": "[WebSearch 旁路真实搜索结果]\n" + real})
+			stream.close()
+			stream.stop("end_turn", tokenCount(real))
+			return
+		}
+	}
+
+	// 正常回放缓冲的标签事件。
+	for _, ev := range events {
 		switch ev.Type {
 		case EventBlockStart:
 			// thinking 与 text 一律输出为 Anthropic text 块：伪协议的 <think>
@@ -326,7 +374,7 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 			stream.open(gin.H{"type": "text", "text": ""})
 		case EventBlockDelta:
 			if ev.Text == "" {
-				return
+				continue
 			}
 			stream.delta(gin.H{"type": "text_delta", "text": ev.Text})
 		case EventBlockEnd:
@@ -339,13 +387,6 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 			stream.delta(gin.H{"type": "input_json_delta", "partial_json": argsJSON(ev.Arguments)})
 			stream.close()
 		}
-	})
-	if err != nil {
-		// 始终新开一个 text 块承载错误信息，避免写入已关闭/非文本块。
-		stream.open(gin.H{"type": "text", "text": ""})
-		stream.delta(gin.H{"type": "text_delta", "text": "\n[错误] " + err.Error()})
-		stream.close()
-		stopReason = "error"
 	}
 	stream.stop(stopReason, tokenCount(raw))
 }
@@ -405,4 +446,36 @@ func webSearchViaChat(query, model string) (string, error) {
 		return "", err
 	}
 	return sb.String(), nil
+}
+
+// webSearchFrameRE 匹配 claude.ai 自发原生搜索的空壳框架行：
+// "Web search results for query: '…'"。claude.ai 在工具模式（Claude Code）上下文里会账号级
+// 自动触发原生搜索，但偏偏在此上下文只回空壳 + "REMINDER" 元提示、无真实内容。
+var webSearchFrameRE = regexp.MustCompile("(?s)Web search results for query:\\s*'([^']*)'")
+
+// isEmptyNativeSearch 判断 claude.ai 响应是否为“原生搜索空壳”：包含原生搜索框架行且同时带有
+// "REMINDER" 元提示。工具模式上下文里此类原生搜索基本都是空壳，因此只要命中即为需要旁路替换
+// 的信号。返回 (是否为空壳, 提取到的查询)。
+func isEmptyNativeSearch(raw string) (bool, string) {
+	if !strings.Contains(raw, "Web search results for query:") {
+		return false, ""
+	}
+	if !strings.Contains(raw, "REMINDER") {
+		// 没有 REMINDER 元提示，说明原生搜索可能正常返回了内容，不拦截。
+		return false, ""
+	}
+	m := webSearchFrameRE.FindStringSubmatch(raw)
+	q := ""
+	if len(m) > 1 {
+		q = strings.TrimSpace(m[1])
+	}
+	return true, q
+}
+
+// searchQueryFallback 在原生搜索框架未给出可用查询时，回退到提示词原文（用户问题）。
+func searchQueryFallback(q, promptText string) string {
+	if strings.TrimSpace(q) != "" {
+		return q
+	}
+	return strings.TrimSpace(promptText)
 }
