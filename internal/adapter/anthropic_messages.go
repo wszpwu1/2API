@@ -274,14 +274,14 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 	}
 
 	// 原生搜索空壳兜底（同流式）：用旁路真实搜索结果替换空壳响应。
-	if empty, q := isEmptyNativeSearch(raw); empty {
+	if hit, q := detectNativeWebSearch(raw); hit {
 		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
 			c.JSON(http.StatusOK, gin.H{
 				"id":            "msg_" + shortID(),
 				"type":          "message",
 				"role":          "assistant",
 				"model":         model,
-				"content":       []gin.H{{"type": "text", "text": "[WebSearch 旁路真实搜索结果]\n" + real}},
+				"content":       []gin.H{{"type": "text", "text": real}},
 				"stop_reason":   "end_turn",
 				"stop_sequence": nil,
 				"usage":         gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(real)},
@@ -355,10 +355,10 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	// 提示、无真实内容）。识别到空壳就用旁路纯聊天搜索（与 WebFetch 等“能用的通道帮不能
 	// 用的”同一思路）取真实结果替换整段响应。这样无论模型走我们的 <tool_call>WebSearch
 	// 标签，还是被 claude.ai 抢先原生搜索，WebSearch 都能拿到真实数据。
-	if empty, q := isEmptyNativeSearch(raw); empty {
+	if hit, q := detectNativeWebSearch(raw); hit {
 		if real, serr := webSearchViaChat(searchQueryFallback(q, prompt.Text), model); serr == nil && strings.TrimSpace(real) != "" {
 			stream.open(gin.H{"type": "text", "text": ""})
-			stream.delta(gin.H{"type": "text_delta", "text": "[WebSearch 旁路真实搜索结果]\n" + real})
+			stream.delta(gin.H{"type": "text_delta", "text": real})
 			stream.close()
 			stream.stop("end_turn", tokenCount(real))
 			return
@@ -448,20 +448,17 @@ func webSearchViaChat(query, model string) (string, error) {
 	return sb.String(), nil
 }
 
-// webSearchFrameRE 匹配 claude.ai 自发原生搜索的空壳框架行：
+// webSearchFrameRE 匹配 claude.ai 自发原生搜索的框架行：
 // "Web search results for query: '…'"。claude.ai 在工具模式（Claude Code）上下文里会账号级
-// 自动触发原生搜索，但偏偏在此上下文只回空壳 + "REMINDER" 元提示、无真实内容。
+// 自动触发原生搜索，但在此上下文结果不稳定（常为空壳、偶发真实数据）。
 var webSearchFrameRE = regexp.MustCompile("(?s)Web search results for query:\\s*'([^']*)'")
 
-// isEmptyNativeSearch 判断 claude.ai 响应是否为“原生搜索空壳”：包含原生搜索框架行且同时带有
-// "REMINDER" 元提示。工具模式上下文里此类原生搜索基本都是空壳，因此只要命中即为需要旁路替换
-// 的信号。返回 (是否为空壳, 提取到的查询)。
-func isEmptyNativeSearch(raw string) (bool, string) {
+// detectNativeWebSearch 检测 claude.ai 响应是否包含自发原生 web 搜索的框架行。只要命中该框架，
+// 即视为需要由旁路真实搜索结果接管——因为该上下文里的原生搜索结果不可靠。统一用旁路纯聊天搜索
+// 取真实数据替换整段响应，保证 WebSearch 稳定可用。（旁路失败时调用方会保留原始响应，不报错。）
+// 返回 (是否命中框架, 框架中提取到的查询)。
+func detectNativeWebSearch(raw string) (bool, string) {
 	if !strings.Contains(raw, "Web search results for query:") {
-		return false, ""
-	}
-	if !strings.Contains(raw, "REMINDER") {
-		// 没有 REMINDER 元提示，说明原生搜索可能正常返回了内容，不拦截。
 		return false, ""
 	}
 	m := webSearchFrameRE.FindStringSubmatch(raw)
