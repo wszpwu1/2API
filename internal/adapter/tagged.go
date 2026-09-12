@@ -67,6 +67,19 @@ IMPORTANT — read carefully before responding:
 - Only emit <final_answer> when you can fully answer using the conversation history alone. When in doubt, prefer calling a tool.
 `
 
+// taggedToolReminder 放在 prompt 末尾（紧邻生成位置）复述工具能力。
+// 原因：claude.ai 上游没有真正的 function calling，工具协议只在 prompt 开头以纯文本声明；
+// Claude Code 多轮长对话里，开头的 taggedToolDirective 会被越堆越长的历史与工具结果稀释，
+// 模型会"忘记"自己具备调用能力、转而模仿它自己上一轮的纯文本 <final_answer> 而拒绝调用工具。
+// 在生成前的最后位置重申一次，可显著提升实际触发率（等价于每轮自动提醒）。
+const taggedToolReminder = `<tool_use_reminder>
+You are inside an agentic tool loop right now. The tools listed above are REAL, live, and callable by you THIS turn.
+- For ANY request needing current / real-time / external information or any action on files, the web, or the system (weather, news, prices, live status, reading/editing files, running commands, searching), you MUST emit a <tool_call> (or <tool_calls>) block now — do NOT answer from memory and do NOT claim you lack the ability.
+- Do not imitate a previous plain-text answer: each turn you decide fresh whether a tool is needed.
+- Emit <final_answer> ONLY when this turn already contains everything required to fully answer, with no tool needed.
+When in doubt, prefer calling the tool.
+</tool_use_reminder>`
+
 // TaggedToolCall 是解析出的单次工具调用。
 type TaggedToolCall struct {
 	Name      string

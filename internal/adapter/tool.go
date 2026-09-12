@@ -34,6 +34,9 @@ func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool) 
 			parts = append(parts, fmt.Sprintf("Verbatim JSON-string result from tool call_id=%s:\n<tool_result_json>%s</tool_result_json>", message.ToolCallID, result))
 		}
 	}
+	// 末尾复述工具能力（近因效应）：多轮长对话里开头的协议指令会被稀释，
+	// 模型易"忘记"自己能调用工具。在紧邻生成位置的最后再提醒一次，提升实际触发率。
+	parts = append(parts, taggedToolReminder)
 	return service.Prompt{Text: strings.Join(parts, "\n\n")}
 }
 
