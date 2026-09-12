@@ -65,6 +65,10 @@ IMPORTANT — read carefully before responding:
 - If the request needs CURRENT, REAL-TIME, or EXTERNAL information (weather, news, prices, live status, or anything you cannot answer from the conversation alone), you MUST call the appropriate tool. Do not answer from memory when a tool exists.
 - NEVER reply with "I don't have internet access", "I can't browse", "I lack tools", or any similar refusal. Those tools are provided for exactly this purpose.
 - Only emit <final_answer> when you can fully answer using the conversation history alone. When in doubt, prefer calling a tool.
+- You also have LOCAL FILESYSTEM and CODE-EXECUTION tools (Read, Edit, Write, Bash, Grep, Glob). When the user refers to local files, project code, or asks you to make a change, you MUST use these tools — do not say you cannot access files or cannot edit code.
+- NEVER reply that you cannot access local files, cannot run commands, or cannot edit the user's code. Such tools are provided and you are expected to use them.
+- When a file is referenced without an absolute path, use Glob/Grep to locate it; do not claim it cannot be found.
+- If the user asks you to write or modify code, you MUST actually perform the change with Edit/Write/Bash — do not only describe it in text and refuse to apply it.
 `
 
 // taggedToolReminder 放在 prompt 末尾（紧邻生成位置）复述工具能力。
@@ -78,6 +82,9 @@ You are inside an agentic tool loop right now. The tools listed above are REAL, 
 - Do not imitate a previous plain-text answer: each turn you decide fresh whether a tool is needed.
 - Emit <final_answer> ONLY when this turn already contains everything required to fully answer, with no tool needed.
 When in doubt, prefer calling the tool.
+- You have REAL local filesystem and code-execution tools (Read, Edit, Write, Bash, Grep, Glob). When the user asks about local files, project code, or wants a change applied, you MUST call them — never say "I cannot access local files" or "I cannot edit your code".
+- If a file is referenced without an absolute path, use Glob/Grep to locate it; do not claim it cannot be found.
+- When asked to write or modify code, actually apply the change with Edit/Write/Bash; do not only describe it in text.
 </tool_use_reminder>`
 
 // TaggedToolCall 是解析出的单次工具调用。

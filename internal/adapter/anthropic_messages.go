@@ -52,7 +52,7 @@ func AnthropicMessages(c *gin.Context) {
 	// （由 buildToolPrompt -> FormatTaggedPrompt 前置），并补一句中性助手身份，
 	// 避免模型被原装 prompt 的"Claude Code 有工具"框架带偏。纯聊天模式仍原样透传。
 	if len(tools) > 0 {
-		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions. For web searches you MUST call the WebSearch tool via <tool_call> tags and must not rely on any built-in search capability."}}, msgs...)
+		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant with real tools. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions. For web searches you MUST call the WebSearch tool via <tool_call> tags and must not rely on any built-in search capability. For local files you MUST use Read/Edit/Grep/Glob; for code changes you MUST use Edit/Write; you have a real shell via Bash. You are NEVER blocked from using these tools — never claim you lack file, shell, or code access."}}, msgs...)
 		// WebSearch 的真实结果由代理侧旁路纯聊天搜索注入（见 fulfillWebSearch），
 		// 避免 claude.ai 工具循环内原生搜索返空壳、也不依赖客户端本地 WebSearch。
 		fulfillWebSearch(msgs, model)
@@ -80,6 +80,9 @@ func AnthropicMessages(c *gin.Context) {
 	prompt.RawRequest = raw
 	prompt.MaxTokens, prompt.Temperature, prompt.TopP, prompt.Stop = req.MaxTokens, req.Temperature, req.TopP, req.StopSequences
 	if len(tools) > 0 {
+		// 给 Claude Code 补一条正确输出示例（用通用工具名），压住"有文件/代码工具却拒绝调用"的倾向。
+		// 仅注入 Anthropic 路径，避免 Codex 工具名不匹配时学错。
+		prompt.Text += "\n\nExample of a correct assistant turn when a tool is needed:\n<tool_call>{\"name\":\"Read\",\"arguments\":{\"path\":\"/abs/path/to/file\"}}</tool_call>"
 		if req.Stream {
 			anthropicToolStream(c, model, prompt)
 		} else {
