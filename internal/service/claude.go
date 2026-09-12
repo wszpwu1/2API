@@ -316,11 +316,36 @@ func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, 
 	return out.UUID, nil
 }
 
-// SendMessage 发送提示词。
-func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attachments []map[string]any, files []string, onText func(string)) (int, error) {
-	// 固定字段对齐网页端请求。
+// buildCompletionBody 构造发送给 Claude.ai 网页端 completion 接口的请求体。
+// 注意：Claude.ai 网页端接口不接受 OpenAI/Anthropic API 的采样与输出限制参数。
+// 兼容层可以接收这些参数（便于日志与未来扩展），但绝对不能把 max_tokens、
+// temperature、top_p 或 stop_sequences 转发给上游，否则上游会返回
+// "Extra inputs are not permitted"。这也是 New API 等 OpenAI 兼容客户端
+// 默认携带 temperature 时文本对话失败的根因。
+func buildCompletionBody(model string, prompt Prompt, attachments []map[string]any, files []string) map[string]any {
+	// 采样参数（temperature/top_p/stop）Claude.ai 网页端不支持且已在 SendMessage
+	// 上层被剥离。这里仅对“纯文本对话”（未带客户端工具、也非 Claude Code 内联路径）
+	// 做自然语言软提示近似，让参数不至于完全失效；工具/Claude Code 路径不注入，
+	// 以免干扰标签协议指令。
+	promptText := prompt.Text
+	if !prompt.ClientTools && !prompt.ForceInline {
+		promptText = applySamplingHint(promptText, prompt.Temperature, prompt.TopP)
+	}
+
+	// 原生工具：仅当客户端未自带工具时才注入。客户端自带工具（如 Claude Code /
+	// Codex）时交给标签协议处理；若仍注入原生 web_search，会抢走客户端自己的
+	// WebSearch/工具调用，导致 Claude Code 无法联网、工具失效。
+	tools := []map[string]any{
+		{"type": "web_search_v0", "name": "web_search"},
+		{"type": "artifacts_v0", "name": "artifacts"},
+		{"type": "repl_v0", "name": "repl"},
+	}
+	if prompt.ClientTools {
+		tools = []map[string]any{}
+	}
+
 	body := map[string]any{
-		"prompt": prompt.Text,
+		"prompt": promptText,
 		"model":  model,
 		"personalized_styles": []map[string]any{
 			{
@@ -334,11 +359,7 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 				"isDefault":  true,
 			},
 		},
-		"tools": []map[string]any{
-			{"type": "web_search_v0", "name": "web_search"},
-			{"type": "artifacts_v0", "name": "artifacts"},
-			{"type": "repl_v0", "name": "repl"},
-		},
+		"tools":               tools,
 		"parent_message_uuid": "00000000-0000-4000-8000-000000000000",
 		"attachments":         []any{},
 		"files":               []any{},
@@ -346,24 +367,44 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 		"rendering_mode":      "messages",
 		"timezone":            "America/Los_Angeles",
 	}
-	// Claude.ai 网页端 completion 接口不接受 max_tokens 字段，
-	// 即使 API 兼容层收到该参数也不能转发，否则上游会返回
-	// "max_tokens: Extra inputs are not permitted"。
-	if prompt.Temperature != nil {
-		body["temperature"] = *prompt.Temperature
-	}
-	if prompt.TopP != nil {
-		body["top_p"] = *prompt.TopP
-	}
-	if len(prompt.Stop) > 0 {
-		body["stop_sequences"] = prompt.Stop
-	}
 	if len(attachments) > 0 {
 		body["attachments"] = attachments
 	}
 	if len(files) > 0 {
 		body["files"] = files
 	}
+	return body
+}
+
+// applySamplingHint 在纯文本对话里，把客户端给定的 temperature/top_p 以自然语言
+// 软提示的形式追加到 prompt，近似其效果。Claude.ai 网页端不支持真正的采样参数，
+// 这是“增强”可用性、让参数不至于完全失效的折中方案；标签协议 / Claude Code 路径
+// 下不调用本函数，避免干扰工具调用指令。
+func applySamplingHint(text string, temperature, topP *float64) string {
+	var hint string
+	if temperature != nil {
+		switch {
+		case *temperature <= 0.2:
+			hint = "请以高度确定、保守、贴合事实的方式作答（近似 temperature≈0）。"
+		case *temperature >= 0.8:
+			hint = "请更有创意、发散、多样化地作答（近似 temperature≈1）。"
+		default:
+			hint = fmt.Sprintf("请以均衡、适度的创造性和随机性作答（近似 temperature≈%.2f）。", *temperature)
+		}
+	}
+	if topP != nil {
+		hint += fmt.Sprintf(" 注意保持候选词分布的聚焦度（近似 top_p≈%.2f）。", *topP)
+	}
+	if hint == "" {
+		return text
+	}
+	return text + "\n\n[采样偏好提示·非官方参数，仅作近似]" + hint
+}
+
+// SendMessage 发送提示词。
+func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attachments []map[string]any, files []string, onText func(string)) (int, error) {
+	// 固定字段对齐网页端请求；不向网页端透传 temperature/top_p/stop 等 OpenAI 参数。
+	body := buildCompletionBody(model, prompt, attachments, files)
 	reqBody, err := json.Marshal(body)
 	if err != nil {
 		return 500, fmt.Errorf("构造请求体失败: %w", err)

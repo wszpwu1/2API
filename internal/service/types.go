@@ -44,6 +44,10 @@ type Prompt struct {
 	Temperature *float64
 	TopP        *float64
 	Stop        []string
+	// ClientTools 表示本次请求由客户端显式提供了工具（走标签协议）。
+	// SendMessage 据此决定是否向 Claude.ai 注入原生工具：客户端自带工具时
+	// 不注入，避免原生 web_search 抢走 Claude Code / Codex 的 WebSearch 与工具调用。
+	ClientTools bool
 }
 
 type CompletionResult struct {

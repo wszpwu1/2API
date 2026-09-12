@@ -80,6 +80,10 @@ func buildPrompt(messages []Message, images []string, tools []map[string]any, pa
 		}
 		prompt.Text = text.String()
 	}
+	// ClientTools 标记本次请求由客户端显式提供了工具（走标签协议）。
+	// 后续 SendMessage 会据此决定是否注入 Claude.ai 原生工具：客户端自带工具时
+	// 不注入，避免原生 web_search 抢走 Claude Code / Codex 的 WebSearch 与工具调用。
+	prompt.ClientTools = len(tools) > 0
 	var err error
 	prompt.Images, err = prepareImages(images)
 	return prompt, err

@@ -1,7 +1,10 @@
+# 本地源码构建版：部署我们改过的 claude2api（不再 pull 上游镜像）。
+# 在服务器上执行：docker compose up -d --build
 services:
   claude2api:
-    image: ghcr.io/basketikun/claude2api:latest
-    pull_policy: always
+    build: .
+    image: claude2api:local
+    container_name: claude2api
     ports:
       - "8787:8787"
     volumes:
