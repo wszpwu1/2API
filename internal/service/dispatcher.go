@@ -10,6 +10,24 @@ import (
 	"claude2api/internal/repository"
 )
 
+// refusalMarkers 拒绝关键词（中英双覆盖，宁可误重开、不可漏重开）。
+var refusalMarkers = []string{
+	"cannot access", "i don't have", "no real filesystem",
+	"injected", "prompt injection", "虚假信息", "伪装",
+	"拒绝", "没有真实", "不具备", "无法访问", "注入",
+}
+
+// isRefusal 检测文本是否包含拒绝特征。
+func isRefusal(text string) bool {
+	lower := strings.ToLower(text)
+	for _, m := range refusalMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	apiIndex     int
 	apiIndexLock sync.Mutex
@@ -78,17 +96,6 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		retries = 8
 	}
 
-	// 已输出内容后不能换号，否则客户端会收到重复片段。
-	emitted := false
-	wrappedOnText := func(t string) {
-		if t != "" {
-			emitted = true
-		}
-		if onText != nil {
-			onText(t)
-		}
-	}
-
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		acct := pickAPIAccount()
@@ -96,6 +103,37 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 			return res, fmt.Errorf("号池中没有可用账号")
 		}
 		email := acct.Email
+		res.Account = email
+
+		// 已输出内容后不能换号，否则客户端会收到重复片段。
+		emitted := false
+
+		// 拒绝检测缓冲：累积前 ~500 字符，命中拒绝关键词则判定为需重试。
+		refusalBuf := &strings.Builder{}
+		const refusalBufLimit = 500
+		refusalDetected := false
+
+		wrappedOnText := func(t string) {
+			if t != "" {
+				emitted = true
+			}
+
+			// 先累积到缓冲区做拒绝检测
+			if !refusalDetected && refusalBuf.Len() < refusalBufLimit {
+				refusalBuf.WriteString(t)
+				if refusalBuf.Len() >= refusalBufLimit || strings.Contains(t, "\n") {
+					// 达到长度或遇到换行时检测一次
+					if isRefusal(refusalBuf.String()) {
+						refusalDetected = true
+						slog.Warn("[API] 检测到模型拒绝，标记重试", "email", email, "buf", refusalBuf.String())
+					}
+				}
+			}
+
+			if onText != nil {
+				onText(t)
+			}
+		}
 		res.Account = email
 		lease := clientFor(acct, s.Proxy)
 		lease.Lock()
@@ -162,6 +200,13 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		if code == 429 {
 			lease.ready = false
 		}
+
+		// 若检测到模型拒绝，视作可重试错误（下一轮会新建会话）。
+		if refusalDetected {
+			err = fmt.Errorf("模型拒绝响应，触发重试")
+			slog.Warn("[API] 拒绝检测触发重试", "email", email, "attempt", attempt)
+		}
+
 		if s.ChatDelete && err == nil {
 			cl, cid := client, convID
 			go func() {
