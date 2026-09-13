@@ -70,7 +70,7 @@ func AnthropicMessages(c *gin.Context) {
 		msgs = append([]Message{{Role: "system", Content: strings.TrimSpace(sysText)}}, msgs...)
 	}
 
-	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice)
+	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice, clientPrefsFromHeaders(c))
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "图片处理失败: "+err.Error())
 		return

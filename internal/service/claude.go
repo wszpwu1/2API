@@ -368,7 +368,7 @@ func buildCompletionBody(model string, prompt Prompt, attachments []map[string]a
 		"files":               []any{},
 		"sync_sources":        []any{},
 		"rendering_mode":      "messages",
-		"timezone":            "America/Los_Angeles",
+		"timezone":            timezoneOrDefault(prompt.Timezone),
 	}
 	if len(attachments) > 0 {
 		body["attachments"] = attachments
@@ -377,6 +377,14 @@ func buildCompletionBody(model string, prompt Prompt, attachments []map[string]a
 		body["files"] = files
 	}
 	return body
+}
+
+// timezoneOrDefault 返回 prompt 指定的时区，为空则回退默认值。
+func timezoneOrDefault(tz string) string {
+	if tz != "" {
+		return tz
+	}
+	return "Asia/Shanghai"
 }
 
 // applySamplingHint 在纯文本对话里，把客户端给定的 temperature/top_p 以自然语言
@@ -423,6 +431,11 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 	req.Header.Set("accept", "text/event-stream, text/event-stream")
 	req.Header.Set("cache-control", "no-cache")
 	req.Header.Set("referer", claudeAIBaseURL+"/chat/"+convID)
+
+	// Per-request accept-language：若 Prompt 指定了语言偏好则覆盖默认值
+	if prompt.AcceptLanguage != "" {
+		req.Header.Set("accept-language", prompt.AcceptLanguage)
+	}
 
 	resp, err := claudeAI.client.Do(req)
 	if err != nil {

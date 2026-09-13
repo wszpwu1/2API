@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"claude2api/internal/config"
@@ -53,7 +55,22 @@ func modelOrDefault(model string) string {
 	return model
 }
 
-func buildPrompt(messages []Message, images []string, tools []map[string]any, parallel bool, toolChoice json.RawMessage) (service.Prompt, error) {
+// clientPrefs 是客户端通过 HTTP header 显式透传的语言与时区偏好。
+type clientPrefs struct {
+	lang string // Accept-Language 原始值
+	tz   string // X-Timezone 原始值
+}
+
+// clientPrefsFromHeaders 从请求头读取客户端显式语言/时区偏好。
+// Accept-Language 使用标准头；时区使用自定义的 X-Timezone 头。
+func clientPrefsFromHeaders(c *gin.Context) clientPrefs {
+	return clientPrefs{
+		lang: c.GetHeader("accept-language"),
+		tz:   c.GetHeader("x-timezone"),
+	}
+}
+
+func buildPrompt(messages []Message, images []string, tools []map[string]any, parallel bool, toolChoice json.RawMessage, prefs clientPrefs) (service.Prompt, error) {
 	var prompt service.Prompt
 	if len(tools) > 0 {
 		cleaned := make([]Message, len(messages))
@@ -84,9 +101,176 @@ func buildPrompt(messages []Message, images []string, tools []map[string]any, pa
 	// 后续 SendMessage 会据此决定是否注入 Claude.ai 原生工具：客户端自带工具时
 	// 不注入，避免原生 web_search 抢走 Claude Code / Codex 的 WebSearch 与工具调用。
 	prompt.ClientTools = len(tools) > 0
+
+	// 确定语言与时区：客户端 header 透传优先，其次按最后一条用户消息自动检测。
+	lang := detectLanguageAndTimezone(&prompt, messages, prefs)
+	prompt.Text += languageReplyInstruction(lang)
+
 	var err error
 	prompt.Images, err = prepareImages(images)
 	return prompt, err
+}
+
+// detectLanguageAndTimezone 确定语言与时区并写回 prompt，返回最终语言。
+// 优先级：客户端 header 透传 > 最后一条真实用户消息的字符脚本自动检测。
+func detectLanguageAndTimezone(prompt *service.Prompt, messages []Message, prefs clientPrefs) detectedLanguage {
+	lang := languageUnknown
+	if v := strings.TrimSpace(prefs.lang); v != "" {
+		lang = langFromAcceptHeader(v)
+		prompt.AcceptLanguage = v
+	} else {
+		lang = detectScriptLanguage(extractLastUserMessage(messages))
+		prompt.AcceptLanguage = acceptLanguageFor(lang)
+	}
+	if v := strings.TrimSpace(prefs.tz); v != "" {
+		prompt.Timezone = v
+	} else {
+		prompt.Timezone = timezoneFor(lang)
+	}
+	return lang
+}
+
+// langFromAcceptHeader 从 Accept-Language 主值推断语言，无法识别时返回 unknown。
+func langFromAcceptHeader(v string) detectedLanguage {
+	primary := strings.ToLower(strings.TrimSpace(strings.SplitN(v, ",", 2)[0]))
+	if i := strings.IndexByte(primary, ';'); i >= 0 {
+		primary = strings.TrimSpace(primary[:i])
+	}
+	switch {
+	case strings.HasPrefix(primary, "zh"):
+		return languageChinese
+	case strings.HasPrefix(primary, "ja"):
+		return languageJapanese
+	case strings.HasPrefix(primary, "ko"):
+		return languageKorean
+	case strings.HasPrefix(primary, "en"):
+		return languageEnglish
+	default:
+		return languageUnknown
+	}
+}
+
+func defaultAcceptLang() string {
+	return "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"
+}
+
+func defaultTimezone() string {
+	return "Asia/Shanghai"
+}
+
+type detectedLanguage string
+
+const (
+	languageUnknown  detectedLanguage = "unknown"
+	languageChinese  detectedLanguage = "zh"
+	languageEnglish  detectedLanguage = "en"
+	languageJapanese detectedLanguage = "ja"
+	languageKorean   detectedLanguage = "ko"
+)
+
+// extractLastUserMessage 提取最后一条非空 user 消息，过滤代码块、仅保留自然语言。
+func extractLastUserMessage(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			content := strings.TrimSpace(stripCodeBlocks(messages[i].Content))
+			if content == "" {
+				continue
+			}
+			runes := []rune(content)
+			if len(runes) > 2000 {
+				content = string(runes[len(runes)-2000:])
+			}
+			return content
+		}
+	}
+	return ""
+}
+
+var codeBlockRegex = regexp.MustCompile("(?s)```.*?```|`[^`]*`")
+
+// stripCodeBlocks 移除 Markdown 围栏代码块和行内代码，避免代码内容干扰语言检测。
+func stripCodeBlocks(text string) string {
+	return codeBlockRegex.ReplaceAllString(text, "")
+}
+
+func detectScriptLanguage(text string) detectedLanguage {
+	counts := map[detectedLanguage]int{}
+	for _, r := range text {
+		switch {
+		case unicode.In(r, unicode.Hiragana, unicode.Katakana):
+			counts[languageJapanese] += 3
+		case unicode.In(r, unicode.Hangul):
+			counts[languageKorean] += 3
+		case unicode.In(r, unicode.Han):
+			counts[languageChinese]++
+		case unicode.In(r, unicode.Latin) && unicode.IsLetter(r):
+			counts[languageEnglish]++
+		}
+	}
+
+	// 日文假名和韩文音节是强特征，应优先于共同使用的汉字。
+	if counts[languageJapanese] > 0 {
+		return languageJapanese
+	}
+	if counts[languageKorean] > 0 {
+		return languageKorean
+	}
+	// 中文技术请求常夹带较长的英文标识符。两个及以上汉字通常已足以
+	// 表明自然语言主体为中文，避免 buildPrompt 等标识符反客为主。
+	if counts[languageChinese] >= 2 {
+		return languageChinese
+	}
+
+	best := languageUnknown
+	for _, lang := range []detectedLanguage{languageJapanese, languageKorean, languageChinese, languageEnglish} {
+		if counts[lang] > counts[best] {
+			best = lang
+		}
+	}
+	return best
+}
+
+func acceptLanguageFor(lang detectedLanguage) string {
+	switch lang {
+	case languageChinese:
+		return "zh-CN,zh;q=0.9,zh-TW;q=0.8,en-US;q=0.7,en;q=0.6"
+	case languageJapanese:
+		return "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7"
+	case languageKorean:
+		return "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+	case languageEnglish:
+		return "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7"
+	default:
+		return defaultAcceptLang()
+	}
+}
+
+func timezoneFor(lang detectedLanguage) string {
+	switch lang {
+	case languageJapanese:
+		return "Asia/Tokyo"
+	case languageKorean:
+		return "Asia/Seoul"
+	case languageEnglish:
+		return "America/Los_Angeles"
+	default:
+		return defaultTimezone()
+	}
+}
+
+func languageReplyInstruction(lang detectedLanguage) string {
+	switch lang {
+	case languageChinese:
+		return "\n\n请使用中文回答，并与用户最后一条消息的语言保持一致。"
+	case languageJapanese:
+		return "\n\n日本語で回答し、ユーザーの最後のメッセージと同じ言語を使用してください。"
+	case languageKorean:
+		return "\n\n사용자의 마지막 메시지와 같은 언어인 한국어로 답변하세요."
+	case languageEnglish:
+		return "\n\nAnswer in English, matching the language of the user's last message."
+	default:
+		return "\n\nAnswer in the same language as the user's last message."
+	}
 }
 
 // sanitizeSystemPrompt removes client-specific identity boilerplate while

@@ -48,6 +48,13 @@ type Prompt struct {
 	// SendMessage 据此决定是否向 Claude.ai 注入原生工具：客户端自带工具时
 	// 不注入，避免原生 web_search 抢走 Claude Code / Codex 的 WebSearch 与工具调用。
 	ClientTools bool
+
+	// AcceptLanguage 期望的回复语言（如 "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"）。
+	// 为空则由 BuildHeaders 使用默认值。
+	AcceptLanguage string
+	// Timezone 期望的时区（如 "Asia/Shanghai"）。
+	// 为空则由 buildCompletionBody 使用默认值。
+	Timezone string
 }
 
 type CompletionResult struct {

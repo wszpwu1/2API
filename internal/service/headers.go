@@ -4,7 +4,7 @@ import "github.com/google/uuid"
 
 const (
 	claudeAccept         = "*/*"
-	claudeAcceptLanguage = "en-US,en;q=0.9"
+	claudeAcceptLanguage = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
 	claudeClientPlatform = "web_claude_ai"
 	claudeClientVersion  = "1.0.0"
 	claudeClientSHA      = "882d9a7d43eced6a100e636e1dfdebc55764bd78"
@@ -18,7 +18,7 @@ var (
 	deviceNS = uuid.MustParse("9d8c7b6a-5e4f-4321-9a8b-7c6d5e4f3a2b")
 )
 
-// BuildHeaders 返回 claude.ai 请求头。
+// BuildHeaders 返回 claude.ai 请求头（客户端创建时调用，无 per-request prompt）。
 func BuildHeaders(seed string) map[string]string {
 	anonID := fallbackAnonID
 	deviceID := fallbackDeviceID
@@ -27,16 +27,16 @@ func BuildHeaders(seed string) map[string]string {
 		deviceID = uuid.NewSHA1(deviceNS, []byte(seed)).String()
 	}
 	return map[string]string{
-		"accept":                    claudeAccept,
-		"content-type":              "application/json",
-		"origin":                    claudeAIBaseURL,
-		"referer":                   claudeAIBaseURL + "/",
-		"user-agent":                claudeAIUserAgent,
-		"accept-language":           claudeAcceptLanguage,
-		"anthropic-client-platform": claudeClientPlatform,
-		"anthropic-client-version":  claudeClientVersion,
-		"anthropic-client-sha":      claudeClientSHA,
-		"anthropic-anonymous-id":    anonID,
-		"anthropic-device-id":       deviceID,
+		"accept":                     claudeAccept,
+		"content-type":               "application/json",
+		"origin":                     claudeAIBaseURL,
+		"referer":                    claudeAIBaseURL + "/",
+		"user-agent":                 claudeAIUserAgent,
+		"accept-language":            claudeAcceptLanguage,
+		"anthropic-client-platform":  claudeClientPlatform,
+		"anthropic-client-version":   claudeClientVersion,
+		"anthropic-client-sha":       claudeClientSHA,
+		"anthropic-anonymous-id":     anonID,
+		"anthropic-device-id":        deviceID,
 	}
 }
