@@ -90,6 +90,8 @@ sk-ant-sid01-yyyyyyyy
 
 实际可用性取决于账号权限和 Claude.ai 上游状态，请以 `GET /v1/models` 的返回结果为准。
 
+> **工具调用与模型措辞**：`claude-sonnet-5` / `claude-sonnet-5-5` 会把"工具真实可用、不许说自己没有工具"这类强指令式提示词判定为 prompt injection，并直接在回复里拒绝调用工具（日志表现为 `检测到模型拒绝` / `模型拒绝响应，触发重试`）。服务端对 `claude-sonnet-5*` 单独使用中性措辞：标签协议与工具清单照旧下发，但改由"工具由调用方提供、由调用方执行"的口径说明，并去掉 `<tool_use_reminder>` 这类伪系统标签；其余模型（含 `claude-sonnet-4-6`）的提示词保持原样。
+
 <details>
 <summary><code>GET /v1/models</code></summary>
 <br>
