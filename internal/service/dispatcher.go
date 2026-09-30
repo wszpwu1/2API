@@ -93,7 +93,48 @@ func clientFor(acct *repository.Account, proxy string) *accountClient {
 	return client
 }
 
-// pickAPIAccount 轮询可用账号。
+// isUnsupportedModelErr 判断上游是否因为不认识模型 ID 而拒绝请求。
+// Claude.ai 对未知模型返回 HTTP 400 {"type":"invalid_request_error","message":"Unsupported model"}。
+func isUnsupportedModelErr(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unsupported model")
+}
+
+// canonicalModelID 只做模型 ID 的写法规范化：去空白、统一小写、点号改连字符。
+// 上游只认连字符形态（claude-sonnet-5-5），客户端可能写成 claude-sonnet-5.5；
+// 这一步不改变型号——claude-sonnet-5 与 claude-sonnet-5-5 是两个独立模型，
+// 各自原样发给上游，绝不做互相回落。
+func canonicalModelID(model string) string {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return m
+	}
+	return strings.ToLower(strings.ReplaceAll(m, ".", "-"))
+}
+
+var (
+	modelAliasMu    sync.RWMutex
+	modelAliasCache = map[string]string{}
+)
+
+// resolveUpstreamModel 返回实际发给上游的模型 ID。写法与上游不一致时
+// （点号 vs 连字符），首次请求会在 CreateConversation 失败后按规范写法重试一次
+// 并缓存映射，后续请求直接命中缓存，不再重复试错。
+func resolveUpstreamModel(model string) string {
+	modelAliasMu.RLock()
+	alias, ok := modelAliasCache[model]
+	modelAliasMu.RUnlock()
+	if ok {
+		return alias
+	}
+	return model
+}
+
+func cacheModelAlias(from, to string) {
+	modelAliasMu.Lock()
+	modelAliasCache[from] = to
+	modelAliasMu.Unlock()
+}
+
 func pickAPIAccount() *repository.Account {
 	accounts := repository.LoadAccounts()
 	usable := make([]repository.Account, 0, len(accounts))
@@ -212,8 +253,8 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		}
 
 		think := strings.HasSuffix(reqModel, "-thinking")
-		model := strings.TrimSuffix(reqModel, "-thinking")
-
+		requestedModel := strings.TrimSuffix(reqModel, "-thinking")
+		model := resolveUpstreamModel(requestedModel)
 		if acct.OrgUUID == "" {
 			info, err := client.GetUserInfo()
 			if err != nil {
@@ -246,6 +287,21 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		}
 
 		convID, err := client.CreateConversation(model, think)
+		if err != nil && isUnsupportedModelErr(err) {
+			// 上游不认这个模型名写法（例如客户端写点号 claude-sonnet-5.5，
+			// 或大小写不符）：按规范写法重试一次并缓存映射，后续请求直接命中缓存。
+			// 这里只改写法，不换型号：claude-sonnet-5 与 claude-sonnet-5-5
+			// 是两个独立模型，不会互相回落。
+			if canonical := canonicalModelID(model); canonical != "" && canonical != model {
+				if cid, vErr := client.CreateConversation(canonical, think); vErr == nil {
+					slog.Info("[API] 模型名已按上游写法适配", "client", requestedModel, "upstream", canonical)
+					cacheModelAlias(requestedModel, canonical)
+					convID, model, err = cid, canonical, nil
+				} else {
+					slog.Warn("[API] 模型名变体重试仍失败", "client", requestedModel, "upstream", canonical, "err", vErr)
+				}
+			}
+		}
 		if err != nil {
 			lastErr = err
 			if s.RemoveInvalidAccount && strings.Contains(err.Error(), "account_session_invalid") {

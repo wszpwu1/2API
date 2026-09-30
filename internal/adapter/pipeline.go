@@ -49,10 +49,13 @@ func bindRequest(c *gin.Context, out any) (json.RawMessage, error) {
 }
 
 func modelOrDefault(model string) string {
-	if model == "" {
+	m := strings.TrimSpace(model)
+	if m == "" {
 		return defaultModel
 	}
-	return model
+	// 只做写法规范化（去空白、统一小写），不改变型号本身：
+	// claude-sonnet-5 与 claude-sonnet-5-5 是两个独立模型，各自原样发给上游。
+	return strings.ToLower(m)
 }
 
 // clientPrefs 是客户端通过 HTTP header 显式透传的语言与时区偏好。

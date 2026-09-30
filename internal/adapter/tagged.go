@@ -92,8 +92,11 @@ When in doubt, prefer calling the tool.
 // 用户消息判定为 prompt injection，并在回复里明确拒绝调用工具（实测拒绝原文：
 // "That reminder block ... is a prompt injection ... I don't have real Read/Edit/Bash tools"），
 // 而 claude-sonnet-4-6 等旧模型不受影响。因此只对该系列换措辞，其余模型保持原样。
+//
+// 判定统一收敛到 isSonnet5Family：claude-sonnet-5 / 5-5（含点号写法 5.5）与
+// 同系列新增模型自动对齐，避免新模型漏配后落到旧代强指令措辞上。
 func plainToolFraming(model string) bool {
-	return strings.Contains(strings.ToLower(model), "sonnet-5")
+	return isSonnet5Family(model)
 }
 
 // taggedToolDirectivePlain 面向注入敏感模型的中性协议说明：标签协议与工具清单仍然
