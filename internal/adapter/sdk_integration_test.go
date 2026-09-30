@@ -3,8 +3,6 @@ package adapter
 import (
 	"context"
 	"encoding/json"
-	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -22,23 +20,8 @@ const (
 	sdkTestModel   = "claude-sonnet-5"
 )
 
-// sdkServerReachable 探测本地联调服务是否已启动。这组用例需要真实 server 在跑，
-// 未启动时应跳过，而不是让 `go test ./...` 抛出难以定位的连接错误。
-func sdkServerReachable() bool {
-	addr := strings.TrimPrefix(strings.TrimPrefix(sdkTestBaseURL, "http://"), "https://")
-	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
 func sdkTestConfig(t *testing.T) (context.Context, string, string, string) {
 	t.Helper()
-	if !sdkServerReachable() {
-		t.Skipf("跳过 SDK 集成测试：%s 未启动（先运行 server 再执行本组用例）", sdkTestBaseURL)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	return ctx, sdkTestBaseURL, sdkTestAPIKey, sdkTestModel
