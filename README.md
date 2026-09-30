@@ -221,7 +221,8 @@ curl http://localhost:8787/v1/messages \
 
 </details>
 
-### 客户端接入
+> **"某个模型没有任何输出"排查**：上游返回 200 但整条流零文本增量（账号级静默拒绝、模型在当前会话不可用等）时，服务端现在会把它当作可重试错误，并在日志里保留原始 SSE 片段。排查顺序：① 服务日志搜 `上游 completion 流未返回可见文本`、`本轮结果不可用，触发重试`；② 管理后台「调用日志」看该次请求的 `Response`/`Error`（需 `detailed_api_log: true`）；③ 若确认是模型侧静默拒绝，可在 `config.yaml` 提高 `retry_count`（如 3）让请求自动换账号重试，或临时改用其他模型。
+
 
 Codex CLI 可通过自定义 OpenAI Base URL 使用 `/v1/responses`，Claude Code 可通过自定义 Anthropic Base URL 使用 `/v1/messages`；两者均填写本服务地址和后台创建的 API Key 即可。
 

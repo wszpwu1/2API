@@ -40,3 +40,25 @@ func TestHasToolBlock(t *testing.T) {
 		t.Fatal("普通文本不应被识别为工具调用块")
 	}
 }
+
+// attemptError 决定本轮结果是否可用：模型拒绝与上游空回复都应触发重试，
+// 而"先表达顾虑、随后仍产出工具调用"不应被误判为拒绝。
+func TestAttemptError(t *testing.T) {
+	cases := []struct {
+		name                       string
+		refusal, toolSeen, emitted bool
+		want                       error
+	}{
+		{"正常回答", false, false, true, nil},
+		{"正常工具调用", false, true, true, nil},
+		{"模型拒绝", true, false, true, errRefusal},
+		{"拒绝但已产出工具调用", true, true, true, nil},
+		{"静默空回复（Sonnet 5-5 等）", false, false, false, errEmptyCompletion},
+		{"空回复且命中拒绝词", true, false, false, errRefusal},
+	}
+	for _, tc := range cases {
+		if got := attemptError(tc.refusal, tc.toolSeen, tc.emitted); got != tc.want {
+			t.Errorf("%s: attemptError=%v, 期望 %v", tc.name, got, tc.want)
+		}
+	}
+}

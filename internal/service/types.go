@@ -30,6 +30,7 @@ type SseEvent struct {
 		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 	Error struct {
+		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
 }

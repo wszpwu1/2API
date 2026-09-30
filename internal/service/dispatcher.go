@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -40,6 +41,30 @@ func isRefusal(text string) bool {
 // hasToolBlock 判断文本中是否已出现工具调用块。
 func hasToolBlock(text string) bool {
 	return toolBlockRe.MatchString(text)
+}
+
+// 本轮结果不可用时统一按可重试错误处理。
+var (
+	// errRefusal 模型明确拒绝（命中拒绝关键词且没有产出工具调用）。
+	errRefusal = errors.New("模型拒绝响应，触发重试")
+	// errEmptyCompletion 上游返回空回复（200 但整条流零可见文本）。
+	errEmptyCompletion = errors.New("上游未返回任何内容（空回复），触发重试")
+)
+
+// attemptError 判断本轮结果是否应视为失败重试。
+// 参数依次为：是否命中拒绝关键词、本流是否已产出工具调用块、是否有可见文本输出。
+//   - 命中拒绝关键词但已产出工具调用：模型先表达顾虑、随后仍按协议调用，视为正常；
+//   - 命中拒绝关键词：模型拒绝；
+//   - 完全没有可见文本：上游静默空回复（Sonnet 5-5 等出现过 200 但零增量）。
+//     若当成成功返回，客户端只会看到"没有任何输出"，服务端日志也没有痕迹。
+func attemptError(refusalDetected, toolSeen, emitted bool) error {
+	switch {
+	case refusalDetected && !toolSeen:
+		return errRefusal
+	case !emitted:
+		return errEmptyCompletion
+	}
+	return nil
 }
 
 var (
@@ -239,14 +264,18 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 			lease.ready = false
 		}
 
-		// 若检测到模型拒绝，视作可重试错误（下一轮会新建会话）。
-		// 例外：本轮流中已出现过工具调用块（模型先表达顾虑、随后仍按协议调用工具），
-		// 说明并未真正拒绝，直接采用这一轮结果，避免误报"模型拒绝响应"。
+		// 判定本轮结果是否可用（见 attemptError）：模型拒绝与上游空回复都按可重试
+		// 错误处理，下一轮会新建会话；本轮已有可见输出时错误按"流式输出中断"返回。
 		if refusalDetected && toolSeen {
 			slog.Info("[API] 拒绝关键词命中但已产出工具调用，按正常结果返回", "email", email)
-		} else if refusalDetected {
-			err = fmt.Errorf("模型拒绝响应，触发重试")
-			slog.Warn("[API] 拒绝检测触发重试", "email", email, "attempt", attempt, "buf", refusalBuf.String())
+		}
+		if aerr := attemptError(refusalDetected, toolSeen, emitted); aerr != nil {
+			// 已有传输层错误时保留原错误（信息更全），仅补充日志；两种情况都会重试。
+			if err == nil {
+				err = aerr
+			}
+			slog.Warn("[API] 本轮结果不可用，触发重试",
+				"email", email, "attempt", attempt, "err", aerr.Error(), "buf", refusalBuf.String())
 		}
 
 		if s.ChatDelete && err == nil {

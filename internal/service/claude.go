@@ -461,6 +461,9 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 	return 200, parseCompletionSSE(resp.Body, onText)
 }
 
+// sseDiagLines 限制诊断采样的原始 SSE 行数，避免无界内存占用。
+const sseDiagLines = 40
+
 // parseCompletionSSE 解析 completion 流。
 func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 	scanner := bufio.NewScanner(raw)
@@ -473,8 +476,18 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 	nextLanguage := false
 	language := "md"
 
+	// emitted 记录整条流是否产生过可见文本；dataLines/sample 保留原始 SSE 片段，
+	// 供"上游 200 但零增量"的静默空回复留证。
+	emitted := false
+	dataLines := 0
+	sample := make([]string, 0, sseDiagLines)
+
 	emit := func(s string) {
-		if s != "" && onText != nil {
+		if s == "" {
+			return
+		}
+		emitted = true
+		if onText != nil {
 			onText(s)
 		}
 	}
@@ -484,12 +497,26 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
+		dataLines++
+		if len(sample) < sseDiagLines {
+			sample = append(sample, utils.Truncate(line, 200))
+		}
 		var ev SseEvent
 		if err := json.Unmarshal([]byte(line[6:]), &ev); err != nil {
 			continue
 		}
-		if ev.Type == "error" && ev.Error.Message != "" {
-			return fmt.Errorf("upstream: %s", ev.Error.Message)
+		if ev.Type == "error" {
+			// 上游错误事件必须原样暴露：以前只处理 error.message 非空的情况，
+			// 一旦上游只给 error.type（或事件结构变化），整轮就会静默变成空回复，
+			// 客户端只看到"没有任何输出"，日志里也查不到原因。
+			msg := ev.Error.Message
+			if msg == "" {
+				msg = ev.Error.Type
+			}
+			if msg == "" {
+				msg = utils.Truncate(line, 300)
+			}
+			return fmt.Errorf("upstream: %s", msg)
 		}
 		switch ev.ContentBlock.Type {
 		case "tool_use":
@@ -566,5 +593,15 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 			emit(text)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !emitted {
+		// 静默空回复：上游返回 200，但整条流既没有错误事件、也没有任何文本/思考增量
+		// （例如某个模型账号级静默拒绝、或模型在当前会话里不可用）。
+		// 这里留下原始 SSE 片段便于定位；调用方会把空回复当作失败重试。
+		slog.Warn("[API] 上游 completion 流未返回可见文本",
+			"dataLines", dataLines, "sample", strings.Join(sample, " | "))
+	}
+	return nil
 }
