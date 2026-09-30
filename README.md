@@ -92,6 +92,8 @@ sk-ant-sid01-yyyyyyyy
 
 > **工具调用与模型措辞**：`claude-sonnet-5` / `claude-sonnet-5-5` 会把"工具真实可用、不许说自己没有工具"这类强指令式提示词判定为 prompt injection，并直接在回复里拒绝调用工具（日志表现为 `检测到模型拒绝` / `模型拒绝响应，触发重试`）。服务端对 `claude-sonnet-5*` 单独使用中性措辞：标签协议与工具清单照旧下发，但改由"工具由调用方提供、由调用方执行"的口径说明，并去掉 `<tool_use_reminder>` 这类伪系统标签；其余模型（含 `claude-sonnet-4-6`）的提示词保持原样。
 
+> **"某个模型没有任何输出"排查**：上游返回 200 但整条流零文本增量（账号级静默拒绝、模型在当前会话不可用等）时，服务端现在会把它当作可重试错误，并在日志里保留原始 SSE 片段。排查顺序：① 服务日志搜 `上游 completion 流未返回可见文本`、`本轮结果不可用，触发重试`；② 管理后台「调用日志」看该次请求的 `Response`/`Error`（需 `detailed_api_log: true`）；③ 若确认是模型侧静默拒绝，可在 `config.yaml` 提高 `retry_count`（如 3）让请求自动换账号重试，或临时改用其他模型。
+
 <details>
 <summary><code>GET /v1/models</code></summary>
 <br>
@@ -221,7 +223,7 @@ curl http://localhost:8787/v1/messages \
 
 </details>
 
-> **"某个模型没有任何输出"排查**：上游返回 200 但整条流零文本增量（账号级静默拒绝、模型在当前会话不可用等）时，服务端现在会把它当作可重试错误，并在日志里保留原始 SSE 片段。排查顺序：① 服务日志搜 `上游 completion 流未返回可见文本`、`本轮结果不可用，触发重试`；② 管理后台「调用日志」看该次请求的 `Response`/`Error`（需 `detailed_api_log: true`）；③ 若确认是模型侧静默拒绝，可在 `config.yaml` 提高 `retry_count`（如 3）让请求自动换账号重试，或临时改用其他模型。
+### 客户端接入
 
 
 Codex CLI 可通过自定义 OpenAI Base URL 使用 `/v1/responses`，Claude Code 可通过自定义 Anthropic Base URL 使用 `/v1/messages`；两者均填写本服务地址和后台创建的 API Key 即可。
