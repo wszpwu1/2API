@@ -87,13 +87,20 @@ func AnthropicMessages(c *gin.Context) {
 		return
 	}
 	prompt.ForceInline = true
-	prompt.Text += "\n\nContinue the conversation above with only the assistant's next response."
+	// Sonnet 5 系列（含 5-5）已通过 FormatTaggedPrompt 使用中性协议说明；
+	// 额外追加 "Continue the conversation above..." 与伪造 assistant 示例会被识别为
+	// 注入式指令并触发静默拒答，导致上游 200 但零可见增量（空回复）。
+	if !plainToolFraming(model) {
+		prompt.Text += "\n\nContinue the conversation above with only the assistant's next response."
+	}
 	prompt.RawRequest = raw
 	prompt.MaxTokens, prompt.Temperature, prompt.TopP, prompt.Stop = req.MaxTokens, req.Temperature, req.TopP, req.StopSequences
 	if len(tools) > 0 {
 		// 给 Claude Code 补一条正确输出示例（用通用工具名），压住"有文件/代码工具却拒绝调用"的倾向。
 		// 仅注入 Anthropic 路径，避免 Codex 工具名不匹配时学错。
-		prompt.Text += "\n\nExample of a correct assistant turn when a tool is needed:\n<tool_call>{\"name\":\"Read\",\"arguments\":{\"path\":\"/abs/path/to/file\"}}</tool_call>"
+		if !plainToolFraming(model) {
+			prompt.Text += "\n\nExample of a correct assistant turn when a tool is needed:\n<tool_call>{\"name\":\"Read\",\"arguments\":{\"path\":\"/abs/path/to/file\"}}</tool_call>"
+		}
 		if req.Stream {
 			anthropicToolStream(c, model, prompt)
 		} else {
