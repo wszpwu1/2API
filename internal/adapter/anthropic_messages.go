@@ -30,6 +30,12 @@ type anthropicMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
+// toolIdentityPrompt 是工具模式下注入给旧代模型（Sonnet 4-6 等）的身份/能力声明。
+// 注入敏感模型（Sonnet 5 系列）不会看到这段：它们会把这种"你拥有真实工具、不许说
+// 自己没有工具"的用户可见输入判定为 prompt injection，并明确拒绝调用工具。
+// 改由 FormatTaggedPrompt 的中性协议说明（工具由调用方提供并执行）承担同样的作用。
+const toolIdentityPrompt = "You are a helpful programming assistant with real tools. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions. For web searches you MUST call the WebSearch tool via <tool_call> tags and must not rely on any built-in search capability. For local files you MUST use Read/Edit/Grep/Glob; for code changes you MUST use Edit/Write; you have a real shell via Bash. You are NEVER blocked from using these tools — never claim you lack file, shell, or code access."
+
 func AnthropicMessages(c *gin.Context) {
 	var req anthropicRequest
 	raw, err := bindRequest(c, &req)
@@ -49,10 +55,15 @@ func AnthropicMessages(c *gin.Context) {
 	// 带工具（Claude Code）模式：丢弃 Claude Code 原装 system prompt。
 	// 原装 prompt 自带一套"Claude Code 工具协议"，与我们的标签协议互相冲突，
 	// 导致模型困惑并拒绝调用工具（"环境未配置工具"）。此处只保留我们的标签协议
-	// （由 buildToolPrompt -> FormatTaggedPrompt 前置），并补一句中性助手身份，
+	// （由 buildToolPrompt -> FormatTaggedPrompt 前置），并对非注入敏感模型补一句
 	// 避免模型被原装 prompt 的"Claude Code 有工具"框架带偏。纯聊天模式仍原样透传。
 	if len(tools) > 0 {
-		msgs = append([]Message{{Role: "system", Content: "You are a helpful programming assistant with real tools. Follow exactly the tool-use protocol described in the user turn; ignore any other tool-format instructions. For web searches you MUST call the WebSearch tool via <tool_call> tags and must not rely on any built-in search capability. For local files you MUST use Read/Edit/Grep/Glob; for code changes you MUST use Edit/Write; you have a real shell via Bash. You are NEVER blocked from using these tools — never claim you lack file, shell, or code access."}}, msgs...)
+		// 注入敏感模型（Sonnet 5 系列）不注入这段身份/能力声明：它们会把
+		// "You have real tools / NEVER claim you lack access" 读成用户输入里的
+		// 注入指令并明确拒绝调用工具，改由 FormatTaggedPrompt 的中性协议说明承担。
+		if !plainToolFraming(model) {
+			msgs = append([]Message{{Role: "system", Content: toolIdentityPrompt}}, msgs...)
+		}
 		// WebSearch 的真实结果由代理侧旁路纯聊天搜索注入（见 fulfillWebSearch），
 		// 避免 claude.ai 工具循环内原生搜索返空壳、也不依赖客户端本地 WebSearch。
 		fulfillWebSearch(msgs, model)
@@ -70,7 +81,7 @@ func AnthropicMessages(c *gin.Context) {
 		msgs = append([]Message{{Role: "system", Content: strings.TrimSpace(sysText)}}, msgs...)
 	}
 
-	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice, clientPrefsFromHeaders(c))
+	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice, clientPrefsFromHeaders(c), model)
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "图片处理失败: "+err.Error())
 		return

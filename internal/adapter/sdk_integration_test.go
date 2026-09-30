@@ -3,6 +3,8 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,14 +19,24 @@ func pretty(v any) string { b, _ := json.MarshalIndent(v, "", "  "); return stri
 const (
 	sdkTestBaseURL = "http://127.0.0.1:8787"
 	sdkTestAPIKey  = "claude2api"
-	sdkTestModel   = "claude-sonnet-5"
 )
+
+// sdkTestModel 默认被测模型为 claude-sonnet-5；可用环境变量覆盖，
+// 便于在服务器上逐个验证型号，例如：
+//
+//	CLAUDE2API_TEST_MODEL=claude-sonnet-5-5 go test ./internal/adapter -run SDKToolCall -count=1 -v
+func sdkTestModel() string {
+	if m := strings.TrimSpace(os.Getenv("CLAUDE2API_TEST_MODEL")); m != "" {
+		return m
+	}
+	return "claude-sonnet-5"
+}
 
 func sdkTestConfig(t *testing.T) (context.Context, string, string, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	return ctx, sdkTestBaseURL, sdkTestAPIKey, sdkTestModel
+	return ctx, sdkTestBaseURL, sdkTestAPIKey, sdkTestModel()
 }
 
 func requireToolCalls(t *testing.T, got []string, raw string) {

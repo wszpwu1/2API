@@ -42,7 +42,7 @@ func OpenAIResponses(c *gin.Context) {
 	model := modelOrDefault(req.Model)
 
 	tools := parseTools(req.Tools)
-	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice, clientPrefsFromHeaders(c))
+	prompt, err := buildPrompt(msgs, images, tools, true, req.ToolChoice, clientPrefsFromHeaders(c), model)
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "图片处理失败: "+err.Error())
 		return

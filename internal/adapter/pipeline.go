@@ -70,7 +70,7 @@ func clientPrefsFromHeaders(c *gin.Context) clientPrefs {
 	}
 }
 
-func buildPrompt(messages []Message, images []string, tools []map[string]any, parallel bool, toolChoice json.RawMessage, prefs clientPrefs) (service.Prompt, error) {
+func buildPrompt(messages []Message, images []string, tools []map[string]any, parallel bool, toolChoice json.RawMessage, prefs clientPrefs, model string) (service.Prompt, error) {
 	var prompt service.Prompt
 	if len(tools) > 0 {
 		cleaned := make([]Message, len(messages))
@@ -80,7 +80,7 @@ func buildPrompt(messages []Message, images []string, tools []map[string]any, pa
 				cleaned[i].Content = sanitizeSystemPrompt(cleaned[i].Content)
 			}
 		}
-		prompt = buildToolPrompt(cleaned, tools, parallel)
+		prompt = buildToolPrompt(cleaned, tools, parallel, model)
 		prompt.Text += toolChoiceInstruction(toolChoice)
 	} else {
 		var text strings.Builder

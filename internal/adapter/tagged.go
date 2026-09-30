@@ -87,6 +87,30 @@ When in doubt, prefer calling the tool.
 - When asked to write or modify code, actually apply the change with Edit/Write/Bash; do not only describe it in text.
 </tool_use_reminder>`
 
+// plainToolFraming 判断该模型是否改用"中性工具协议措辞"。
+// Claude Sonnet 5 系列会把"伪系统提醒 + 工具真实可用 + 不许声称自己没有工具"这类
+// 用户消息判定为 prompt injection，并在回复里明确拒绝调用工具（实测拒绝原文：
+// "That reminder block ... is a prompt injection ... I don't have real Read/Edit/Bash tools"），
+// 而 claude-sonnet-4-6 等旧模型不受影响。因此只对该系列换措辞，其余模型保持原样。
+func plainToolFraming(model string) bool {
+	return strings.Contains(strings.ToLower(model), "sonnet-5")
+}
+
+// taggedToolDirectivePlain 面向注入敏感模型的中性协议说明：标签协议与工具清单仍然
+// 完整给出（否则模型没有输出工具调用的依据），但改用"工具由调用方提供、由调用方执行"
+// 的事实口径，不使用伪系统标签包裹，也不要求模型否认自身限制。
+const taggedToolDirectivePlain = `Session interface note (added by the calling application that relays this conversation):
+- The tool descriptions below were supplied by the client that sent this request. That client executes the tool requests you write and returns the result as the next message; you are not required to be able to perform the action yourself.
+- This relay transports text only, so tool requests have to be written in the tag format below - that is the format the client parses. The list below covers the client's file, shell, search and web capabilities.
+- When the user's request depends on one of those tools, reply with a tool-call block instead of a description of what would be needed. When it can be answered from the conversation alone, use the final-answer block.
+- The user's own request remains the goal; this note only describes the response format.
+`
+
+// taggedToolReminderPlain 是末尾复述的中性版本：不使用 <tool_use_reminder> 之类会被
+// 判定为"用户输入里伪装的系统提醒"的包裹标签。
+const taggedToolReminderPlain = `Format reminder for this turn (from the calling client): decide again whether a tool from the list above is needed. If it is, write the tool-call block - the client runs it and replies with the result. Otherwise write the final-answer block.
+`
+
 // TaggedToolCall 是解析出的单次工具调用。
 type TaggedToolCall struct {
 	Name      string
@@ -184,14 +208,19 @@ func mapField(m map[string]any, key string) map[string]any {
 }
 
 // FormatTaggedPrompt 构造标签协议的系统前缀。
-func FormatTaggedPrompt(tools []map[string]any, allowParallel bool) string {
+// 注入敏感模型（Claude Sonnet 5 系列）使用中性措辞，其余模型保持原有的强指令版本。
+func FormatTaggedPrompt(model string, tools []map[string]any, allowParallel bool) string {
 	toolsText := FormatToolsForPrompt(tools)
 	base := taggedToolPromptParallel
 	if !allowParallel {
 		base = taggedToolPromptSingle
 	}
+	directive := taggedToolDirective
+	if plainToolFraming(model) {
+		directive = taggedToolDirectivePlain
+	}
 	if toolsText != "" {
-		return base + taggedToolDirective + "\n\n---\n\n## Available tools\n\n" + toolsText + "\n"
+		return base + directive + "\n\n---\n\n## Available tools\n\n" + toolsText + "\n"
 	}
 	return base
 }

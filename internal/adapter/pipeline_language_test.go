@@ -105,7 +105,7 @@ func TestLangFromAcceptHeader(t *testing.T) {
 func TestBuildPromptAppendsReplyInstruction(t *testing.T) {
 	prompt, err := buildPrompt(
 		[]Message{{Role: "user", Content: "日本語で説明してください"}},
-		nil, nil, false, nil, clientPrefs{},
+		nil, nil, false, nil, clientPrefs{}, "claude-sonnet-4-6",
 	)
 	if err != nil {
 		t.Fatalf("buildPrompt: %v", err)

@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -17,15 +18,28 @@ var refusalMarkers = []string{
 	"拒绝", "没有真实", "不具备", "无法访问", "注入",
 }
 
-// isRefusal 检测文本是否包含拒绝特征。
+// thinkBlockRe 匹配思考块（含被流式截断、尚未闭合的情况）。
+// 思考内容不返回给客户端；新一代模型（Sonnet 5 系列）常在思考里评估/复述
+// "prompt injection" 之类的风险词汇，若据此重试会误杀完全正常的回答。
+var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?(?:</think>|$)`)
+
+// toolBlockRe 匹配工具调用块。
+var toolBlockRe = regexp.MustCompile(`<tool_calls?>`)
+
+// isRefusal 检测可见文本是否包含拒绝特征（思考块内容不计入）。
 func isRefusal(text string) bool {
-	lower := strings.ToLower(text)
+	lower := strings.ToLower(thinkBlockRe.ReplaceAllString(text, ""))
 	for _, m := range refusalMarkers {
 		if strings.Contains(lower, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// hasToolBlock 判断文本中是否已出现工具调用块。
+func hasToolBlock(text string) bool {
+	return toolBlockRe.MatchString(text)
 }
 
 var (
@@ -108,24 +122,48 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		// 已输出内容后不能换号，否则客户端会收到重复片段。
 		emitted := false
 
-		// 拒绝检测缓冲：累积前 ~500 字符，命中拒绝关键词则判定为需重试。
+		// 拒绝检测缓冲：只统计"可见文本"。<think> 段属于模型自述思考、不返回给客户端，
+		// 新一代模型（Sonnet 5 系列）会在其中反复评估"这是不是 prompt injection"，
+		// 若把思考内容计入检测，正常回答会被误判成拒绝并整轮丢弃。
 		refusalBuf := &strings.Builder{}
-		const refusalBufLimit = 500
+		const refusalVisibleLimit = 500 // 可见文本达到该长度后停止检测
+		const refusalRawLimit = 8000    // 含思考块时的累积上限，防止无界增长
 		refusalDetected := false
+
+		// toolSeen 记录整条流里是否出现过工具调用块（标签可能被分片切断，
+		// 因此用滑动窗口拼接后再判断）。用于区分"真的拒绝"与"先表达顾虑、
+		// 随后仍正常调用工具"——后者不应被丢弃。
+		toolProbe := &strings.Builder{}
+		toolSeen := false
 
 		wrappedOnText := func(t string) {
 			if t != "" {
 				emitted = true
 			}
 
-			// 先累积到缓冲区做拒绝检测
-			if !refusalDetected && refusalBuf.Len() < refusalBufLimit {
+			if !toolSeen && t != "" {
+				probe := toolProbe.String() + t
+				if hasToolBlock(probe) {
+					toolSeen = true
+					toolProbe.Reset()
+				} else {
+					if len(probe) > 64 {
+						probe = probe[len(probe)-64:]
+					}
+					toolProbe.Reset()
+					toolProbe.WriteString(probe)
+				}
+			}
+
+			// 先累积到缓冲区做拒绝检测（只看可见文本）
+			if !refusalDetected && refusalBuf.Len() < refusalRawLimit {
 				refusalBuf.WriteString(t)
-				if refusalBuf.Len() >= refusalBufLimit || strings.Contains(t, "\n") {
+				visible := thinkBlockRe.ReplaceAllString(refusalBuf.String(), "")
+				if len(visible) >= refusalVisibleLimit || strings.Contains(t, "\n") {
 					// 达到长度或遇到换行时检测一次
-					if isRefusal(refusalBuf.String()) {
+					if isRefusal(visible) {
 						refusalDetected = true
-						slog.Warn("[API] 检测到模型拒绝，标记重试", "email", email, "buf", refusalBuf.String())
+						slog.Warn("[API] 检测到模型拒绝，标记重试", "email", email, "buf", visible)
 					}
 				}
 			}
@@ -202,9 +240,13 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		}
 
 		// 若检测到模型拒绝，视作可重试错误（下一轮会新建会话）。
-		if refusalDetected {
+		// 例外：本轮流中已出现过工具调用块（模型先表达顾虑、随后仍按协议调用工具），
+		// 说明并未真正拒绝，直接采用这一轮结果，避免误报"模型拒绝响应"。
+		if refusalDetected && toolSeen {
+			slog.Info("[API] 拒绝关键词命中但已产出工具调用，按正常结果返回", "email", email)
+		} else if refusalDetected {
 			err = fmt.Errorf("模型拒绝响应，触发重试")
-			slog.Warn("[API] 拒绝检测触发重试", "email", email, "attempt", attempt)
+			slog.Warn("[API] 拒绝检测触发重试", "email", email, "attempt", attempt, "buf", refusalBuf.String())
 		}
 
 		if s.ChatDelete && err == nil {

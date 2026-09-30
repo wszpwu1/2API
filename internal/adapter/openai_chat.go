@@ -127,7 +127,7 @@ func OpenAIChat(c *gin.Context) {
 	msgs, images := normalizeOpenAIChatMessages(req.Messages)
 
 	tools := parseTools(req.Tools)
-	prompt, err := buildPrompt(msgs, images, tools, allowParallel(req.ParallelToolCalls), req.ToolChoice, clientPrefsFromHeaders(c))
+	prompt, err := buildPrompt(msgs, images, tools, allowParallel(req.ParallelToolCalls), req.ToolChoice, clientPrefsFromHeaders(c), model)
 	if err != nil {
 		apiError(c, http.StatusBadRequest, "图片处理失败: "+err.Error())
 		return

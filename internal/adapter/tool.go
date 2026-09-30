@@ -15,8 +15,8 @@ type ToolCall struct {
 	Arguments string
 }
 
-func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool) service.Prompt {
-	parts := []string{FormatTaggedPrompt(tools, parallel)}
+func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool, model string) service.Prompt {
+	parts := []string{FormatTaggedPrompt(model, tools, parallel)}
 	for _, message := range messages {
 		switch message.Role {
 		case "system":
@@ -36,8 +36,17 @@ func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool) 
 	}
 	// 末尾复述工具能力（近因效应）：多轮长对话里开头的协议指令会被稀释，
 	// 模型易"忘记"自己能调用工具。在紧邻生成位置的最后再提醒一次，提升实际触发率。
-	parts = append(parts, taggedToolReminder)
+	parts = append(parts, toolReminderFor(model))
 	return service.Prompt{Text: strings.Join(parts, "\n\n")}
+}
+
+// toolReminderFor 选择末尾复述文本：注入敏感模型使用中性版本，
+// 避免末尾提醒被读成"用户输入里伪装的系统提醒"而直接拒绝调用工具。
+func toolReminderFor(model string) string {
+	if plainToolFraming(model) {
+		return taggedToolReminderPlain
+	}
+	return taggedToolReminder
 }
 
 func toolChoiceInstruction(raw json.RawMessage) string {
