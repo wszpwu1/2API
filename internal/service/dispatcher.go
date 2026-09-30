@@ -54,49 +54,6 @@ func clientFor(acct *repository.Account, proxy string) *accountClient {
 	return client
 }
 
-// isUnsupportedModelErr 判断上游是否因为不认识模型 ID 而拒绝请求。
-// Claude.ai 对未知模型返回 HTTP 400 {"type":"invalid_request_error","message":"Unsupported model"}。
-func isUnsupportedModelErr(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unsupported model")
-}
-
-// upstreamModelVariant 返回模型名的连字符变体。Claude.ai 上游的模型 ID 只用连字符
-// （claude-sonnet-4-6、claude-sonnet-5），而客户端习惯写成 claude-sonnet-5.5，
-// 直接透传会被 400 Unsupported model 拒绝。没有点号时返回空串，表示无需变体。
-func upstreamModelVariant(model string) string {
-	if !strings.Contains(model, ".") {
-		return ""
-	}
-	return strings.ReplaceAll(model, ".", "-")
-}
-
-var (
-	modelAliasMu    sync.RWMutex
-	modelAliasCache = map[string]string{}
-)
-
-// resolveUpstreamModel 返回实际发给上游的模型 ID。客户端模型名与上游 ID 不一致时，
-// 首次请求会在 CreateConversation 失败后按连字符变体重试并缓存映射，
-// 之后的请求直接命中缓存，不再重复试错。
-func resolveUpstreamModel(model string) string {
-	if model == "" || !strings.Contains(model, ".") {
-		return model
-	}
-	modelAliasMu.RLock()
-	alias, ok := modelAliasCache[model]
-	modelAliasMu.RUnlock()
-	if ok {
-		return alias
-	}
-	return model
-}
-
-func cacheModelAlias(from, to string) {
-	modelAliasMu.Lock()
-	modelAliasCache[from] = to
-	modelAliasMu.Unlock()
-}
-
 // pickAPIAccount 轮询可用账号。
 func pickAPIAccount() *repository.Account {
 	accounts := repository.LoadAccounts()
@@ -192,8 +149,7 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		}
 
 		think := strings.HasSuffix(reqModel, "-thinking")
-		requestedModel := strings.TrimSuffix(reqModel, "-thinking")
-		model := resolveUpstreamModel(requestedModel)
+		model := strings.TrimSuffix(reqModel, "-thinking")
 
 		if acct.OrgUUID == "" {
 			info, err := client.GetUserInfo()
@@ -227,19 +183,6 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 		}
 
 		convID, err := client.CreateConversation(model, think)
-		if err != nil && isUnsupportedModelErr(err) {
-			// 上游不认这个模型 ID（点号写法会被 400 Unsupported model 拒绝）：
-			// 按连字符变体重试一次，成功则缓存映射，后续请求不再重复试错。
-			if variant := upstreamModelVariant(model); variant != "" {
-				if cid, vErr := client.CreateConversation(variant, think); vErr == nil {
-					slog.Info("[API] 模型名已适配上游 ID", "client", requestedModel, "upstream", variant)
-					cacheModelAlias(requestedModel, variant)
-					convID, model, err = cid, variant, nil
-				} else {
-					slog.Warn("[API] 模型名变体重试仍失败", "client", requestedModel, "upstream", variant, "err", vErr)
-				}
-			}
-		}
 		if err != nil {
 			lastErr = err
 			if s.RemoveInvalidAccount && strings.Contains(err.Error(), "account_session_invalid") {
